@@ -11,5 +11,6 @@ extern crate core;
 #[cfg(test)]
 extern crate std;
 
+pub mod list;
 pub mod msdosmz;
 pub mod pecoff;
