@@ -26,7 +26,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     pub fn new(
         sig: &'sig dbus::Sig,
         format: Format,
-        write: &'write mut dyn io::map::Write,
+        write: &'write mut dyn io::map2::Write,
     ) -> Self {
         match format {
             Format::DVarBe => Self::DVar(
@@ -68,7 +68,7 @@ impl<'sig, 'read> Dec<'sig, 'read> {
     pub fn new(
         sig: &'sig dbus::Sig,
         format: Format,
-        read: &'read mut dyn io::map::Read,
+        read: &'read mut dyn io::map2::Read,
     ) -> Self {
         match format {
             Format::DVarBe => Self::DVar(

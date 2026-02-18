@@ -14,7 +14,7 @@ pub use signature::{Cursor, Sig, sig};
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
 pub enum Error {
     /// The underlying I/O operation failed.
-    Io(crate::io::map::Error),
+    Io(crate::io::map2::Error),
     /// The provided type does not match the signature.
     Mismatch,
     /// The signature has not been fully processed.

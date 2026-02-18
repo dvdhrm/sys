@@ -49,7 +49,7 @@ pub struct Enc<'sig, 'write> {
     cursor: Cursor<'sig>,
     level: Level,
     stack: vec::Vec<(dbus::Element, Level, Option<Cursor<'sig>>)>,
-    write: &'write mut dyn io::map::Write,
+    write: &'write mut dyn io::map2::Write,
     enc: Option<(&'write mut Level, Option<usize>, &'write mut usize)>,
 }
 
@@ -58,12 +58,12 @@ pub struct Dec<'sig, 'read> {
     cursor: Cursor<'sig>,
     level: Level,
     stack: vec::Vec<(dbus::Element, Level, Option<Cursor<'sig>>)>,
-    read: &'read mut dyn io::map::Read,
+    read: &'read mut dyn io::map2::Read,
     dec: Option<(&'read mut Level, Option<usize>, &'read mut usize)>,
 }
 
-impl core::convert::From<io::map::Error> for dbus::Error {
-    fn from(v: io::map::Error) -> Self {
+impl core::convert::From<io::map2::Error> for dbus::Error {
+    fn from(v: io::map2::Error) -> Self {
         Self::Io(v)
     }
 }
@@ -109,7 +109,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     pub fn with(
         sig: MownSig<'sig>,
         format: Format,
-        write: &'write mut dyn io::map::Write,
+        write: &'write mut dyn io::map2::Write,
     ) -> Self {
         Self {
             done: false,
@@ -128,14 +128,14 @@ impl<'sig, 'write> Enc<'sig, 'write> {
 
     pub fn new_be(
         sig: &'sig dbus::Sig,
-        write: &'write mut dyn io::map::Write,
+        write: &'write mut dyn io::map2::Write,
     ) -> Self {
         Self::with(MownSig::new_borrowed(sig), Format::DVarBe, write)
     }
 
     pub fn new_le(
         sig: &'sig dbus::Sig,
-        write: &'write mut dyn io::map::Write,
+        write: &'write mut dyn io::map2::Write,
     ) -> Self {
         Self::with(MownSig::new_borrowed(sig), Format::DVarLe, write)
     }
@@ -193,7 +193,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     }
 
     fn write(
-        write: &mut dyn io::map::Write,
+        write: &mut dyn io::map2::Write,
         idx: &mut usize,
         data: &[u8],
     ) -> Flow<Option<dbus::Error>> {
@@ -201,7 +201,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     }
 
     fn write_iter(
-        write: &mut dyn io::map::Write,
+        write: &mut dyn io::map2::Write,
         idx: &mut usize,
         data: &mut dyn ExactSizeIterator<Item = u8>,
     ) -> Flow<Option<dbus::Error>> {
@@ -209,7 +209,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     }
 
     fn zero(
-        write: &mut dyn io::map::Write,
+        write: &mut dyn io::map2::Write,
         idx: &mut usize,
         len: usize,
     ) -> Flow<Option<dbus::Error>> {
@@ -217,7 +217,7 @@ impl<'sig, 'write> Enc<'sig, 'write> {
     }
 
     fn align(
-        write: &mut dyn io::map::Write,
+        write: &mut dyn io::map2::Write,
         idx: &mut usize,
         exp: u8,
     ) -> Flow<Option<dbus::Error>> {
@@ -454,7 +454,7 @@ impl<'sig, 'read> Dec<'sig, 'read> {
     pub fn with(
         sig: MownSig<'sig>,
         format: Format,
-        read: &'read mut dyn io::map::Read,
+        read: &'read mut dyn io::map2::Read,
     ) -> Self {
         Self {
             cursor: dbus::Cursor::new(sig),
@@ -472,14 +472,14 @@ impl<'sig, 'read> Dec<'sig, 'read> {
 
     pub fn new_be(
         sig: &'sig dbus::Sig,
-        read: &'read mut dyn io::map::Read,
+        read: &'read mut dyn io::map2::Read,
     ) -> Self {
         Self::with(MownSig::new_borrowed(sig), Format::DVarBe, read)
     }
 
     pub fn new_le(
         sig: &'sig dbus::Sig,
-        read: &'read mut dyn io::map::Read,
+        read: &'read mut dyn io::map2::Read,
     ) -> Self {
         Self::with(MownSig::new_borrowed(sig), Format::DVarLe, read)
     }
@@ -536,7 +536,7 @@ impl<'sig, 'read> Dec<'sig, 'read> {
     }
 
     fn read(
-        read: &mut dyn io::map::Read,
+        read: &mut dyn io::map2::Read,
         idx: &mut usize,
         data: &mut [u8],
     ) -> Flow<Option<dbus::Error>> {
@@ -544,7 +544,7 @@ impl<'sig, 'read> Dec<'sig, 'read> {
     }
 
     fn read_uninit(
-        read: &mut dyn io::map::Read,
+        read: &mut dyn io::map2::Read,
         idx: &mut usize,
         data: &mut [core::mem::MaybeUninit<u8>],
     ) -> Flow<Option<dbus::Error>> {
@@ -552,12 +552,12 @@ impl<'sig, 'read> Dec<'sig, 'read> {
     }
 
     fn align(
-        _read: &mut dyn io::map::Read,
+        _read: &mut dyn io::map2::Read,
         idx: &mut usize,
         exp: u8,
     ) -> Flow<Option<dbus::Error>> {
         match idx.checked_next_multiple_of((1 << exp) as usize) {
-            None => Flow::Break(Some(dbus::Error::Io(io::map::Error::Overflow))),
+            None => Flow::Break(Some(dbus::Error::Io(io::map2::Error::Overflow))),
             Some(v) => {
                 *idx = v;
                 Flow::Continue(())
