@@ -134,8 +134,19 @@ impl<'a, B, O> core::convert::From<&'a B> for Mown<'a, B, O>
 where
     B: ?Sized,
 {
+    /// Creates a borrowed version of [`Mown`] from the exact borrowed
+    /// representation.
     fn from(v: &'a B) -> Self {
         Self::new_borrowed(v)
+    }
+}
+
+impl<'a, B, O, const N: usize> core::convert::From<&'a [B; N]> for Mown<'a, [B], O>
+{
+    /// Creates a borrowed version of [`Mown`] from a fixed-size array. Coerces
+    /// the array to a slice first.
+    fn from(v: &'a [B; N]) -> Self {
+        Self::new_borrowed(v as &[_])
     }
 }
 
