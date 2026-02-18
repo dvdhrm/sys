@@ -12,7 +12,7 @@
 #[macro_export]
 macro_rules!
     crate_polonius_coerce_unsafe
-{ ($from:ty, $to:ty, $value:expr) => {
+{ ($from:ty, $to:ty, $value:expr $(,)?) => {
     {
         $crate::marker::phantom_unsafe();
         let from: $from = $value;
