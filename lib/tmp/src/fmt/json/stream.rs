@@ -1,14 +1,11 @@
 //! JSON Streams
 
+/*
 use core::ops::ControlFlow as Flow;
 
-use crate::{
-    fmt::json::{
-        self,
-        token::Token,
-    },
-    io,
-};
+use crate::fmt::json;
+use crate::fmt::json::token::Token;
+use crate::io;
 
 pub struct Null {
 }
@@ -36,12 +33,14 @@ pub struct Prim<'data> {
 
 pub enum Item<'data> {
     Error(Error<'data>),
+    /*
     Prim,
     Key,
     ArrayOpen,
     ArrayClose,
     ObjectOpen,
     ObjectClose,
+    */
 }
 
 #[derive(Clone, Copy)]
@@ -66,17 +65,17 @@ enum Stack {
     Object,
 }
 
-pub struct DecInner {
+pub struct DecEngine {
     state: State,
     stack: alloc::vec::Vec<Stack>,
 }
 
-pub struct Dec<'read> {
-    inner: DecInner,
-    tokenizer: json::token::Dec<'read>,
+pub struct Dec<'read, Stream: ?Sized> {
+    engine: DecEngine,
+    tokenizer: json::token::Dec<'read, Stream>,
 }
 
-impl DecInner {
+impl DecEngine {
     pub fn new() -> Self {
         Self {
             state: State::Root,
@@ -84,6 +83,7 @@ impl DecInner {
         }
     }
 
+/*
     fn unexpected(&mut self) -> Item<'static> {
         Item::Error(Error::Foobar)
     }
@@ -282,17 +282,48 @@ impl DecInner {
 
         Flow::Continue(item)
     }
+    */
+
+    fn step(
+        &mut self,
+        token: Option<&json::token::Token>,
+    ) -> Option<Error> {
+        None
+    }
 }
 
-impl<'read> Dec<'read> {
+impl<'read, Stream> Dec<'read, Stream>
+where
+    Stream: ?Sized + io::stream::Read,
+{
     pub fn with(
-        read: &'read mut dyn io::stream::Read,
+        read: &'read mut Stream,
     ) -> Self {
         Self {
-            inner: DecInner::new(),
+            engine: DecEngine::new(),
             tokenizer: json::token::Dec::with(read),
         }
     }
+
+    pub fn next(
+        &mut self,
+    ) -> Flow<io::stream::More, Option<json::token::Report<'_, Stream>>> {
+        loop {
+            let report = self.tokenizer.next()?;
+            let step = if let Some(ref v) = report {
+                match v.get() {
+                    Ok(v) => self.engine.step(v),
+                    Err(e) => None,
+                }
+            } else {
+                self.engine.step(None)
+            };
+        }
+
+        Flow::Continue(None)
+    }
+
+    /*
 
     fn advance_inner(&mut self) -> Flow<io::stream::More, Option<Item<'_>>> {
         let token = self.tokenizer.pop()?;
@@ -331,4 +362,6 @@ impl<'read> Dec<'read> {
     pub fn pop(&mut self) -> Flow<io::stream::More, Item<'_>> {
         self.advance()
     }
+    */
 }
+*/

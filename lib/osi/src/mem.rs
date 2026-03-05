@@ -166,8 +166,30 @@ pub const unsafe fn bswap_copy<T>(v: &T) -> T {
 /// only necessary when providing initialized data to code that can handle
 /// possibly uninitialized data.
 pub const fn as_uninit<'a, T>(v: &'a T) -> &'a Uninit<T> {
+    // SAFETY: Any `T` is a valid `Uninit<T>`.
     unsafe {
         core::mem::transmute::<&T, &Uninit<T>>(v)
+    }
+}
+
+/// Alias a type as a mutable [`MaybeUninit`](core::mem::MaybeUninit).
+///
+/// Generally, data must not be mutably aliased as uninitialized. This would
+/// allow overwriting the data with a copy of actually uninitialized data or
+/// otherwise acquire raw writable references to the object. Hence, this
+/// function is unsafe.
+///
+/// This function mainly serves as documentation of this often non-obvious
+/// requirement when mutably aliasing types as uninitialized.
+///
+/// ## Safety
+///
+/// The returned mutable reference must never write data that violates the
+/// invariants of `T`.
+pub const unsafe fn as_uninit_mut<'a, T>(v: &'a mut T) -> &'a mut Uninit<T> {
+    // SAFETY: Any `T` is a valid `Uninit<T>`. Write-safety is delegated.
+    unsafe {
+        core::mem::transmute::<&mut T, &mut Uninit<T>>(v)
     }
 }
 
@@ -175,8 +197,24 @@ pub const fn as_uninit<'a, T>(v: &'a T) -> &'a Uninit<T> {
 ///
 /// This works like [`as_uninit()`] but for slices of `T`.
 pub const fn slice_as_uninit<'a, T>(v: &'a [T]) -> &'a [Uninit<T>] {
+    // SAFETY: Any `T` is a valid `Uninit<T>`.
     unsafe {
         core::mem::transmute::<&[T], &[Uninit<T>]>(v)
+    }
+}
+
+/// Alias a slice as a mutable [`MaybeUninit`](core::mem::MaybeUninit).
+///
+/// This works like [`as_uninit_mut()`] but for slices of `T`.
+///
+/// ## Safety
+///
+/// The returned mutable reference must never write data that violates the
+/// invariants of `T`.
+pub const unsafe fn slice_as_uninit_mut<'a, T>(v: &'a mut [T]) -> &'a mut [Uninit<T>] {
+    // SAFETY: Any `T` is a valid `Uninit<T>`. Write-safety is delegated.
+    unsafe {
+        core::mem::transmute::<&mut [T], &mut [Uninit<T>]>(v)
     }
 }
 
@@ -188,6 +226,7 @@ pub const fn slice_as_uninit<'a, T>(v: &'a [T]) -> &'a [Uninit<T>] {
 /// in an initialized state. Calling this when the content is not yet fully
 /// initialized causes immediate undefined behavior.
 pub const unsafe fn assume_init<'a, T>(v: &'a Uninit<T>) -> &'a T {
+    // SAFETY: Delegated to caller.
     unsafe {
         core::mem::transmute::<&Uninit<T>, &T>(v)
     }
@@ -202,6 +241,7 @@ pub const unsafe fn assume_init<'a, T>(v: &'a Uninit<T>) -> &'a T {
 /// in an initialized state. Calling this when the content is not yet fully
 /// initialized causes immediate undefined behavior.
 pub const unsafe fn assume_init_mut<'a, T>(v: &'a mut Uninit<T>) -> &'a mut T {
+    // SAFETY: Delegated to caller.
     unsafe {
         core::mem::transmute::<&mut Uninit<T>, &mut T>(v)
     }
@@ -215,6 +255,7 @@ pub const unsafe fn assume_init_mut<'a, T>(v: &'a mut Uninit<T>) -> &'a mut T {
 /// in an initialized state. Calling this when the content is not yet fully
 /// initialized causes immediate undefined behavior.
 pub const unsafe fn slice_assume_init<'a, T>(v: &'a [Uninit<T>]) -> &'a [T] {
+    // SAFETY: Delegated to caller.
     unsafe {
         core::mem::transmute::<&[Uninit<T>], &[T]>(v)
     }
@@ -229,6 +270,7 @@ pub const unsafe fn slice_assume_init<'a, T>(v: &'a [Uninit<T>]) -> &'a [T] {
 /// in an initialized state. Calling this when the content is not yet fully
 /// initialized causes immediate undefined behavior.
 pub const unsafe fn slice_assume_init_mut<'a, T>(v: &'a mut [Uninit<T>]) -> &'a mut [T] {
+    // SAFETY: Delegated to caller.
     unsafe {
         core::mem::transmute::<&mut [Uninit<T>], &mut [T]>(v)
     }
@@ -245,7 +287,7 @@ pub const unsafe fn slice_assume_init_mut<'a, T>(v: &'a mut [Uninit<T>]) -> &'a 
 /// - `T` has no padding bytes, and all bytes of `v` belong to the type `T.
 ///   This implies that all bytes in `v` are initialized.
 pub const unsafe fn as_bytes<'a, T>(v: &'a T) -> &'a [u8] {
-    // SAFETY: Propagated to caller.
+    // SAFETY: Delegated to caller.
     unsafe {
         core::slice::from_raw_parts::<'a, u8>(
             v as *const _ as *const _,
@@ -270,7 +312,7 @@ pub const unsafe fn as_bytes<'a, T>(v: &'a T) -> &'a [u8] {
 ///   guarantees that no use of the returned reference ever produces invalid
 ///   values.
 pub const unsafe fn as_bytes_mut<'a, T>(v: &'a mut T) -> &'a mut [u8] {
-    // SAFETY: Propagated to caller.
+    // SAFETY: Delegated to caller.
     unsafe {
         core::slice::from_raw_parts_mut::<'a, u8>(
             v as *mut _ as *mut _,
@@ -293,7 +335,7 @@ pub const unsafe fn as_bytes_mut<'a, T>(v: &'a mut T) -> &'a mut [u8] {
 ///   their respective type. This implies that all bytes in `a` and `b` are
 ///   initialized.
 pub unsafe fn eq<A, B>(a: &A, b: &B) -> bool {
-    // SAFETY: Propagated to caller.
+    // SAFETY: Delegated to caller.
     unsafe { *as_bytes(a) == *as_bytes(b) }
 }
 

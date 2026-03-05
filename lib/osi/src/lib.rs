@@ -34,6 +34,13 @@
 //     standard library, no such features are exposed for searching u8. Given
 //     that these can be greatly optimized by the compiler, they seem a worthy
 //     fit for the standard library.
+//
+// - dyn-dispatch Self: Trait methods that return a type that uses `Self` are
+//     not dyn-compatible. However, if `Self` referred to `dyn T` rather than
+//     the actual implementing type, this restriction would not apply.
+//     While it is possible to implement such methods via generic-impls, it is
+//     not possible to do this directly on a trait. This is unfortunate and
+//     would help creating much more ergonomic dyn-compatible traits.
 
 #![no_std]
 

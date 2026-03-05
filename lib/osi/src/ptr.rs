@@ -39,7 +39,18 @@ pub struct NonNull4<T: ?Sized> {
 /// Unlike references, `Ptr` does not make any guarantees about immutability or
 /// aliasing of the target allocation.
 ///
+/// The main purpose of [`Ptr`] is to annotate non-null raw pointers with a
+/// lifetime. For all other intents and purposes, this is still a raw pointer
+/// and each usage scenario can place additional safety requirements on the
+/// type.
+///
 /// A `Ptr` is always [convertible to a reference](self#conversion).
+///
+/// ## Subtyping
+///
+/// A `Ptr` is covariant over its lifetime `'a`, but invariant over the type
+/// it points to `T`. This ensures that `Ptr` can represent both shared and
+/// mutable references.
 #[repr(transparent)]
 pub struct Ptr<'a, T: ?Sized> {
     inner: core::ptr::NonNull<T>,
@@ -264,8 +275,18 @@ impl<'a, T: ?Sized> Ptr<'a, T> {
     /// Create a new instance from a shared reference.
     pub const fn from_ref(v: &'a T) -> Self {
         // SAFETY: References are naturally convertible to a reference for
-        //         their entire lifetime.
+        //     their entire lifetime.
         unsafe { Self::new(crate::ptr::nonnull_from_ref(v)) }
+    }
+
+    /// Create a new instance from a mutable reference.
+    ///
+    /// Note that [`Ptr`] implements `Clone` and `Copy`, so the exclusiveness
+    /// guarantee of the original pointer is not propagated through [`Ptr`].
+    pub const fn from_mut(v: &'a mut T) -> Self {
+        // SAFETY: References are naturally convertible to a reference for
+        //     their entire lifetime.
+        unsafe { Self::new(crate::ptr::nonnull_from_mut(v)) }
     }
 
     /// Convert this into its underlying [`NonNull`](core::ptr::NonNull).
@@ -319,6 +340,13 @@ impl<'a, T: ?Sized> Ptr<'a, T> {
 
     /// Mutably dereference this wrapper to the pointed object.
     ///
+    /// This mutably borrows the original pointer to ensure no two mutable
+    /// references are created from the same pointer. This mirrors the
+    /// behavior of [`NonNull::as_mut()`](core::ptr::NonNull::as_mut()). This
+    /// is not enforced, though. By cloning `self` beforehand multiple mutable
+    /// references can be created, but it would violate the unsafe
+    /// requirements.
+    ///
     /// ## Safety
     ///
     /// The aliasing requirements of mutable references must be guaranteed.
@@ -327,11 +355,23 @@ impl<'a, T: ?Sized> Ptr<'a, T> {
     }
 }
 
-// `Ref` behaves like `&'a T` and `&'a mut T` combined.
+impl<'a, T> Ptr<'a, [T]> {
+    /// Return the length of the slice.
+    ///
+    /// The returned value is the number of elements, not the number of bytes.
+    ///
+    /// Since the length is part of the pointer rather than part of the pointed
+    /// type, this function is safe without dereferencing the pointer.
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+// `Ptr` behaves like `&'a T` and `&'a mut T` combined.
 unsafe impl<'a, T: ?Sized + Send + Sync> Send for Ptr<'a, T> {
 }
 
-// `Ref` behaves like `&'a T` and `&'a mut T` combined.
+// `Ptr` behaves like `&'a T` and `&'a mut T` combined.
 unsafe impl<'a, T: ?Sized + Sync> Sync for Ptr<'a, T> {
 }
 

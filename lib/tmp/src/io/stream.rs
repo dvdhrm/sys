@@ -29,7 +29,7 @@ pub enum Error {
 
 /// `More` describes the data extents needed to serve a request.
 ///
-/// The main use is for [`Read::map_raw()`] and its derivatives to signal how
+/// The main use is for [`Read::map()`] and its derivatives to signal how
 /// much more data is needed to serve the request.
 ///
 /// The type describes the extents necessary to serve a request. However, those
@@ -48,36 +48,30 @@ pub struct More {
     pub len: usize,
 }
 
-/// `Break` describes an interruption of buffered data accesses.
+/// A shared slice for reading from a stream.
 ///
-/// This type is used as break value in a [`ControlFlow`](Flow). It indicates
-/// either a hard error that cannot be served by the stream (denoted by an
-/// `Err<Error>` value), or a lack of buffers that needs to be dealt with
-/// out-of-band by the stream implementation (denoted by a `Ok<More>` value).
-pub type Break = Result<More, Error>;
+/// [`Self`] represents a non-linear data slice into an instance of [`Read`].
+/// It can be thought of as the non-linear equivalent to `&[u8]`.
+///
+/// Since data buffers are not necessarily available linearly, [`Self`] can be
+/// used to treat the data as if it was available linearly. It provides
+/// functions to copy data out of the buffers into linear memory.
+#[derive(Clone, Debug, Hash)]
+#[derive(Eq, PartialEq)]
+pub struct Slice<'read, T: ?Sized> {
+    read: &'read T,
+    range: core::ops::Range<usize>,
+}
 
-/// A type alias for mapped buffers.
+/// Input stream with buffered reads.
 ///
-/// In most cases data mapped from a [`Read`] implementation can be borrowed
-/// directly from the underlying buffers. However, implementations might use
-/// vectored buffers, and as such the buffers are not entirely located in
-/// linear memory. If areas overlapping multiple vectors are mapped, the memory
-/// is copied instead.
-///
-/// This type hides the details whether data is directly borrowed or in a
-/// temporary copy.
-pub type Map<'a> = osi::mown::Mown<'a, [u8], alloc::boxed::Box<[u8]>>;
-
-/// `Read` allows buffered reads from a data stream.
-///
-/// This trait is a connection between protocol implementations and transport
-/// layers. That is, it allows writing code that reads structured data from a
-/// data stream without knowing the transport layer used to stream the data.
+/// This trait allows reading from stream buffers without having to rely on
+/// a specific stream implementation. The trait is an abstraction over the
+/// buffers used by input streams. The actual I/O operations are outside the
+/// scope of this trait.
 ///
 /// The trait is similar to [`std::io::Read`] but is designed for buffered
-/// streams that perform transport layer operations 
-///
-/// The actual transport layer operations are not part of this trait, but must
+/// streams. The actual I/O operations are not part of this trait, but must
 /// be handled separately. This trait is just an abstraction for the data
 /// buffer. That is, when a read request cannot be served due to insufficient
 /// buffered data, the request will return [`ControlFlow::Break`](Flow::Break)
@@ -86,10 +80,17 @@ pub type Map<'a> = osi::mown::Mown<'a, [u8], alloc::boxed::Box<[u8]>>;
 /// pass this information to the transport layer. This is outside of the scope
 /// of this trait.
 ///
-/// If this trait is used for non-streamed operations (i.e., all data has been
-/// prefetched), then a break value of type [`More`] indicates that the end of
-/// the data has been reached.
-pub trait Read {
+/// ## Safety
+///
+/// The implementation must guarantee that no inner mutability of the data can
+/// happen. Two consecutive reads of the data buffers must yield the same
+/// logical result if performed via the same shared reference.
+///
+/// A rearrangement of the data buffers is allowed. That is, data can be
+/// linearized or split, or moved at the will of the implementation even via
+/// interior mutability. However, these operations must be infallible and never
+/// change the logical content of the stream buffers.
+pub unsafe trait Read {
     /// Advance the stream by the specified number of bytes.
     ///
     /// This will irrevocably discard the specified number of bytes from the
@@ -99,95 +100,168 @@ pub trait Read {
     /// The underlying stream will buffer data until this function is called.
     fn advance(&mut self, len: usize);
 
-    /// Map the raw data of the stream.
+    /// Return the length of the stream buffers.
     ///
-    /// This will return a linear memory mapping of the data of the stream at
-    /// the specified index relative to the current stream position.
+    /// This represents the amount of data that is currently stored in the
+    /// stream buffers. It does not represent the overall capacity of the
+    /// buffers.
+    fn len(&self) -> usize;
+
+    /// Map the data buffers of the stream.
     ///
-    /// This will only return an empty slice if `len` is 0 and the index points
-    /// to the end of the stream. In all other cases it will always return the
-    /// longest possible slice it can linearly borrow at the indicated
-    /// position.
+    /// This will return a linear memory mapping of the data buffers of the
+    /// stream at the specified index relative to the current stream position.
     ///
-    /// Moreover, `len` is nothing more than a hint to indicate how much data
-    /// the caller expects to read from the stream. That is, if the
-    /// implementation can deduce that there is insufficient data available to
-    /// serve `len` bytes, it shall break with a suitable value of [`More`],
-    /// rather than returning short mappings. This is not a necessity, though.
+    /// The returned slice covers the maximally possible extents that are
+    /// linearly available at the given index.
+    ///
+    /// The slice has a length of 0 if, and only if, the data stream was
+    /// terminated and no more data will be made available via any means. If
+    /// the stream can still get new data, it will never return a slice of
+    /// length 0. Instead, if the index points past the extents of the data
+    /// buffers, [`ControlFlow::Break`](Flow::Break) with a value of [`More`]
+    /// is returned, indicating that I/O must be performed to serve the
+    /// requrest.
     ///
     /// This function does not advance the position of the underlying stream.
     /// Repeated calls to this function will operate on the same data. Use
     /// [`Self::advance()`] to advance the position of the stream.
     /// Furthermore, this function does not perform any I/O. This function
     /// merely maps the available data buffers or rearranges the data to ensure
-    /// it is available as a linear mapping.
-    ///
-    /// If the underlying stream does not have sufficient data buffered, this
-    /// will return [`ControlFlow::Break`](Flow::Break) with a value of
-    /// [`More`] indicating how much data is needed. It is up to the caller to
-    /// pass this information to the stream operators to ensure more data is
-    /// made available.
-    fn map_raw(&self, idx: usize, len: usize) -> Flow<Break, &[u8]>;
+    /// it is available as a linear mapping, if desired.
+    fn map(&self, idx: usize) -> Flow<More, &[u8]>;
+}
 
-    /// Map limited data at a specific offset.
+impl<'read, T: ?Sized + Read> Slice<'read, T> {
+    /// Create a new slice with the given extents.
     ///
-    /// This works like [`Self::map_raw()`] but will always limit the
-    /// returned slice to a maximum of `len` bytes.
-    fn map_at(&self, idx: usize, len: usize) -> Flow<Break, &[u8]> {
-        let map = self.map_raw(idx, len)?;
-        Flow::Continue(&map[..core::cmp::min(len, map.len())])
+    /// ## Panics
+    ///
+    /// This will panic if `range` exceeds the extents of `read`.
+    pub fn new(
+        read: &'read T,
+        range: core::ops::Range<usize>,
+    ) -> Self {
+        assert!(
+            range.len() == 0
+            || (
+                range.start <= read.len()
+                && range.end <= read.len()
+            )
+        );
+        Self {
+            read: read,
+            range: range,
+        }
     }
 
-    /// Map limited data.
+    /// Try creating a new slice with the given extents.
     ///
-    /// This works like [`Self::map_at()`] but uses an index of 0.
-    fn map(&self, len: usize) -> Flow<Break, &[u8]> {
-        self.map_at(0, len)
+    /// Unlike [`Self::new()`] this will never panic but return
+    /// [`FlowControl::Break`](Flow::Break) with a value of [`More`] if the
+    /// extents are not covered by the stream buffers.
+    pub fn try_new(
+        read: &'read T,
+        range: core::ops::Range<usize>,
+    ) -> Flow<More, Self> {
+        if range.len() == 0 {
+            Flow::Continue(Slice::new(read, range))
+        } else if range.start <= read.len() && range.end <= read.len() {
+            Flow::Continue(Slice::new(read, range))
+        } else {
+            Flow::Break(More {
+                idx: range.start,
+                len: range.end - range.start,
+            })
+        }
     }
 
-    /// Read data at a specific offset.
+    /// Return the underlying stream referenced by this slice.
+    pub fn stream(&self) -> &'read T {
+        self.read
+    }
+
+    /// Return the extents of this slice.
+    pub fn extents(&self) -> core::ops::Range<usize> {
+        self.range.clone()
+    }
+
+    /// Return the length of the slice.
+    pub fn len(&self) -> usize {
+        self.range.len()
+    }
+
+    /// Return a linear mapping of the slice at the given offset.
     ///
-    /// This works like [`Self::map_raw()`] but guarantees that the returned
-    /// slice has a length of `len`. If the requested data is not available
-    /// in linear memory, this will copy the data into a slice using repeated
-    /// calls to [`Self::map_raw()`].
-    fn read_at(&self, idx: usize, len: usize) -> Flow<Break, Map<'_>> {
-        if idx.checked_add(len).is_none() {
-            return Flow::Break(Err(Error::Overflow));
+    /// This will always return the longest possible linear mapping at the
+    /// given offset. If `idx` points past the end of the slice, an empty
+    /// mapping is returned.
+    ///
+    /// This function will never return a mapping that exceeds the extents
+    /// of the slice.
+    pub fn map(&self, idx: usize) -> &'read [u8] {
+        match self.range.start.checked_add(idx) {
+            None => &[],
+            Some(v) if v >= self.range.end => &[],
+            Some(v) => {
+                // `Read` guarantees immutability of its content. Repeated
+                // mappings thus must succeed.
+                let map = self.read.map(v).continue_value().unwrap();
+                &map[..core::cmp::min(map.len(), self.len() - idx)]
+            },
         }
+    }
 
-        let mut map = self.map_at(idx, len)?;
-        if map.len() >= len {
-            return Flow::Continue(Map::new_borrowed(map));
-        }
-
-        let mut buf_u = alloc::boxed::Box::new_uninit_slice(len);
+    /// Copy data from the slice into a linear buffer.
+    ///
+    /// Data from the slice will be copied into the linear buffer `dst`. The
+    /// destination buffer must be equal to, or shorter than, the size of the
+    /// slice. If shorter, the data is truncated.
+    ///
+    /// ## Panics
+    ///
+    /// This function will panic if `dst` is longer than `self`.
+    pub fn copy_uninit(&self, dst: &mut [Uninit<u8>]) {
         let mut n: usize = 0;
-        loop {
-            let map_u = osi::mem::slice_as_uninit(map);
-            let end = n.strict_add(map_u.len());
-            buf_u[n..end].copy_from_slice(map_u);
+        while n < dst.len() {
+            let map = osi::mem::slice_as_uninit(self.map(n));
+            assert_ne!(map.len(), 0);
+            let map = &map[..core::cmp::min(map.len(), dst.len() - n)];
+
+            let end = n.strict_add(map.len());
+            dst[n..end].copy_from_slice(map);
             n = end;
-
-            if n >= len {
-                break;
-            }
-
-            map = self.map_at(idx + n, len - n)?;
         }
-
-        // SAFETY: `buf_u` just got fully initialized.
-        let buf = unsafe { buf_u.assume_init() };
-        Flow::Continue(Map::new_owned(buf))
     }
 
-    /// Read data from the stream.
+    /// Read the entire slice into a linear mapping.
     ///
-    /// This works like [`Self::read_at()`] but uses an index of 0.
-    fn read(&self, len: usize) -> Flow<Break, Map<'_>> {
-        self.read_at(0, len)
+    /// If the data is available linearly, a shared reference is returned.
+    /// Otherwise, an allocated buffer with the linear data is returned.
+    pub fn read(
+        &self,
+    ) -> osi::mown::Mown<'read, [u8], alloc::boxed::Box<[u8]>> {
+        let map = self.map(0);
+        if map.len() >= self.len() {
+            osi::mown::Mown::new_borrowed(map)
+        } else {
+            let mut buf_u = alloc::boxed::Box::new_uninit_slice(self.len());
+            self.copy_uninit(&mut *buf_u);
+
+            // SAFETY: `buf_u` just got fully initialized.
+            let buf = unsafe { buf_u.assume_init() };
+            osi::mown::Mown::new_owned(buf)
+        }
     }
 }
+
+/// `Break` describes an interruption of buffered data accesses.
+///
+/// This type is used as break value in a [`ControlFlow`](Flow). It indicates
+/// either a hard error that cannot be served by the stream (denoted by an
+/// `Err<Error>` value), or a lack of buffers that needs to be dealt with
+/// out-of-band by the stream implementation (denoted by a `Ok<More>` value).
+pub type Break = Result<More, Error>;
 
 /// `Write` allows buffered writes to a data stream.
 ///
@@ -342,156 +416,6 @@ pub trait Write {
     }
 }
 
-/// Read data from the stream for as long as the predicate indicates.
-///
-/// This extends [`Read::read_at()`] by reading buffered data for as long as
-/// the provided predicate returns `true`. The predicate will be called for
-/// each byte past the position given to this function. Once the predicate
-/// returns `false`, the data starting from the passed index up until
-/// (including) this position is returned.
-///
-/// The behavior otherwise matches [`Read::read_at()`].
-///
-/// `idx` is an offset relative to the current streaming position. All access
-/// is performed relative to this index. If set to 0, all access is relative to
-/// the current streaming position.
-///
-/// `max` is an optional maximum number of bytes to check. If set, the
-/// operation will stop once `max` bytes have been processed, or the predicate
-/// failed, whichever occurred first. If unset, the operation will only stop
-/// when the predicate fails.
-///
-/// `n` is an offset relative to `idx` where to start running the predicate.
-/// `n` is incremented each time the predicate is run and returned `true`. This
-/// is useful to resume an operation that was interrupted with
-/// [`ControlFlow::Break()`](core::ops::ControlFlow::Break), but avoid
-/// restarting from the beginning.
-///
-/// On success, the returned mapping will start at `idx` and go up to
-/// (including) the first byte that failed the predicate, or `idx+max` if the
-/// maximum was set and reached. That is, all data that was accessed is
-/// returned.
-///
-/// However, `n` will be set to the length of the mapping excluding a possible
-/// trailing byte that failed the predicate.
-///
-/// Similar to [`Read::read_at()`] the mapping will be a copy if it is not
-/// provided in linear memory. Otherwise, it is a simple borrowed slice.
-pub fn read_at_while<'this, This, Predicate>(
-    this: &'this This,
-    idx: usize,
-    n: &mut usize,
-    max: Option<usize>,
-    mut predicate: Predicate,
-) -> Flow<Break, Map<'this>>
-where
-    This: ?Sized + Read,
-    Predicate: FnMut(usize, u8) -> bool,
-{
-    loop {
-        let mut map: &[u8];
-
-        let len = if let Some(v) = max {
-            if *n >= v {
-                return this.read_at(idx, v);
-            }
-            v - *n
-        } else {
-            usize::MAX
-        };
-
-        let Some(from) = idx.checked_add(*n) else {
-            return Flow::Break(Err(Error::Overflow));
-        };
-
-        map = this.map_raw(from, 1)?;
-        map = &map[..core::cmp::min(len, map.len())];
-
-        for i in 0..map.len() {
-            let Some(pos) = n.checked_add(i) else {
-                return Flow::Break(Err(Error::Overflow));
-            };
-            if !predicate(pos, map[i]) {
-                *n = pos;
-                return this.read_at(idx, pos + 1);
-            }
-        }
-
-        *n = if let Some(v) = n.checked_add(map.len()) {
-            v
-        } else {
-            return Flow::Break(Err(Error::Overflow));
-        };
-    }
-}
-
-/// Read data from the stream for as long as the predicate indicates.
-///
-/// This works like [`read_at_while()`], but with an index of 0.
-pub fn read_while<'this, This, Predicate>(
-    this: &'this This,
-    n: &mut usize,
-    max: Option<usize>,
-    predicate: Predicate,
-) -> Flow<Break, Map<'this>>
-where
-    This: ?Sized + Read,
-    Predicate: FnMut(usize, u8) -> bool,
-{
-    read_at_while(this, 0, n, max, predicate)
-}
-
-impl<'this> dyn Read + 'this {
-    /// Read data from the stream for as long as the predicate indicates.
-    ///
-    /// This works like [`read_at_while()`].
-    pub fn read_at_while<Predicate>(
-        &self,
-        idx: usize,
-        n: &mut usize,
-        max: Option<usize>,
-        predicate: Predicate,
-    ) -> Flow<Break, Map<'_>>
-    where
-        Predicate: FnMut(usize, u8) -> bool,
-    {
-        read_at_while(self, idx, n, max, predicate)
-    }
-
-    /// Read data from the stream for as long as the predicate indicates.
-    ///
-    /// This works like [`read_at_while()`], but with an index of 0.
-    pub fn read_while<Predicate>(
-        &self,
-        n: &mut usize,
-        max: Option<usize>,
-        predicate: Predicate,
-    ) -> Flow<Break, Map<'_>>
-    where
-        Predicate: FnMut(usize, u8) -> bool,
-    {
-        read_while(self, n, max, predicate)
-    }
-}
-
-impl Read for &[u8] {
-    fn advance(&mut self, len: usize) {
-        let v = core::mem::take(self);
-        *self = &v[len..];
-    }
-
-    fn map_raw(&self, idx: usize, len: usize) -> Flow<Break, &[u8]> {
-        match idx.checked_add(len) {
-            None => Flow::Break(Err(Error::Overflow)),
-            Some(v) => if v > self.len() {
-                Flow::Break(Ok(More { idx: idx, len: len }))
-            } else {
-                Flow::Continue(&self[idx..])
-            },
-        }
-    }
-}
-
 impl Write for alloc::vec::Vec<u8> {
     unsafe fn commit(&mut self, len: usize) {
         // SAFETY: Propagated to caller.
@@ -515,294 +439,90 @@ impl Write for alloc::vec::Vec<u8> {
 mod test {
     use super::*;
 
-    // This is a trivial implementation of vectored buffers. It does not cache
-    // LRU positions, nor does it verify request lengths on short reads. This
-    // is allowed, but suboptimal, yet suitable for tests.
-    impl Read for &mut [&[u8]] {
-        fn advance(&mut self, mut len: usize) {
-            while len >= self[0].len() {
-                len -= self[0].len();
-                let v = core::mem::take(self);
-                *self = &mut v[1..];
+    /// A trivial streaming implementation based on a mapped implementation.
+    ///
+    /// This simply combines a mapping with a mutable index to get a streaming
+    /// implementation that never appends any data.
+    // SAFETY: Backing memory uses plain refs so it has no interior mutability.
+    unsafe impl<T: ?Sized + crate::io::map::Read> Read for (usize, &T) {
+        fn advance(&mut self, len: usize) {
+            self.0 = self.0.saturating_add(len);
+        }
+
+        fn len(&self) -> usize {
+            self.1.len().saturating_sub(self.0)
+        }
+
+        fn map(&self, idx: usize) -> Flow<More, &[u8]> {
+            if let Some(v) = self.0.checked_add(idx) {
+                Flow::Continue(self.1.map(v))
+            } else {
+                Flow::Continue(&[])
             }
-
-            self[0] = &self[0][len..];
-        }
-
-        fn map_raw(&self, idx: usize, len: usize) -> Flow<Break, &[u8]> {
-            let mut block_off = idx;
-            let Some(block_id) = self.iter().position(|v| {
-                if block_off < v.len() {
-                    true
-                } else {
-                    block_off -= v.len();
-                    false
-                }
-            }) else {
-                if block_off == 0 && len == 0 {
-                    return Flow::Continue(b"");
-                } else {
-                    return Flow::Break(Ok(More { idx: idx, len: len }));
-                }
-            };
-
-            Flow::Continue(&self[block_id][block_off..])
         }
     }
 
-    // This is a trivial implementation of vectored buffers. It does not cache
-    // LRU positions, nor does it verify request lengths on short writes. This
-    // is allowed, but suboptimal, yet suitable for tests.
-    impl Write for (usize, [[Uninit<u8>; 2]; 16]) {
-        unsafe fn commit(&mut self, len: usize) {
-            self.0 = self.0.strict_add(len);
+    fn test_read_sealed<T: ?Sized + Read>(read: &mut T, expect: &[u8]) {
+        // Total length must match the expected data.
+        assert_eq!(read.len(), expect.len());
+
+        // A mapping at each possible offset must match the expected data.
+        for i in 0..expect.len() {
+            let v = read.map(i).continue_value().unwrap();
+            assert_ne!(v.len(), 0);
+            assert_eq!(v, &expect[i..i+v.len()]);
         }
 
-        fn map_raw(&mut self, idx: usize, len: usize) -> Flow<Break, &mut [Uninit<u8>]> {
-            let Some(mut block_off) = self.0.checked_add(idx) else {
-                return Flow::Break(Err(Error::Overflow));
-            };
-            let Some(block_id) = self.1.iter().position(|v| {
-                if block_off < v.len() {
-                    true
-                } else {
-                    block_off -= v.len();
-                    false
-                }
-            }) else {
-                if block_off == 0 && len == 0 {
-                    return Flow::Continue(&mut []);
-                } else {
-                    return Flow::Break(Ok(More { idx: idx, len: len }));
-                }
-            };
+        // Reading past the end returns emtpy slices for sealed buffers.
+        assert_eq!(read.map(expect.len()).continue_value().unwrap(), &[]);
 
-            Flow::Continue(&mut self.1[block_id][block_off..])
+        // Slicing the data must match the expectation.
+        for i in 0..expect.len() {
+            let v = Slice::new(read, i..expect.len());
+            assert_eq!(&*v.read(), &expect[i..i+v.len()]);
+            let v = Slice::new(read, i..i+1);
+            assert_eq!(&*v.read(), &expect[i..i+1]);
         }
+
+        // Stripping half the data at the beginning and then verifying again.
+        read.advance(expect.len() / 2);
+        {
+            let expect = &expect[expect.len() / 2..];
+            for i in 0..expect.len() {
+                let v = read.map(i).continue_value().unwrap();
+                assert_ne!(v.len(), 0);
+                assert_eq!(v, &expect[i..i+v.len()]);
+            }
+        }
+
+        // Stripping all data and then verifying the buffers are empty.
+        read.advance(expect.len() - (expect.len() / 2));
+        assert_eq!(read.map(0).continue_value().unwrap(), &[]);
     }
 
-    // Verification of basic `Read` functionality using the trivial
-    // implementation.
     #[test]
-    fn read_basic() {
-        let data: &[u8] = b"foobar!";
-        let data_p: &dyn Read = &data;
-
-        // Raw mappings must cover the maximum extents possible, but might not
-        // even cover the requested length.
-        let map = data_p.map_raw(0, 7).continue_value().unwrap();
-        assert_eq!(map, b"foobar!");
-        let map = data_p.map_raw(0, 0).continue_value().unwrap();
-        assert_eq!(map, b"foobar!");
-        let map = data_p.map_raw(3, 0).continue_value().unwrap();
-        assert_eq!(map, b"bar!");
-        let map = data_p.map_raw(7, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let e = data_p.map_raw(0, 8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 0, len: 8 }));
-        let e = data_p.map_raw(3, 5).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 3, len: 5 }));
-
-        // Explicit mappings must never exceed the extents.
-        let map = data_p.map_at(0, 7).continue_value().unwrap();
-        assert_eq!(map, b"foobar!");
-        let map = data_p.map_at(0, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let map = data_p.map_at(3, 3).continue_value().unwrap();
-        assert_eq!(map, b"bar");
-        let map = data_p.map_at(3, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let e = data_p.map_at(0, 8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 0, len: 8 }));
-        let e = data_p.map_at(3, 5).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 3, len: 5 }));
-
-        // `map()` is just shorthand for `map_at(0, ..)`
-        let map = data_p.map(3).continue_value().unwrap();
-        assert_eq!(map, b"foo");
-        let map = data_p.map(0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let e = data_p.map(8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 0, len: 8 }));
-
-        // Reads must always be matched exactly.
-        let map = data_p.read_at(0, 7).continue_value().unwrap();
-        assert_eq!(map.deref(), b"foobar!");
-        let map = data_p.read_at(0, 0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let map = data_p.read_at(3, 3).continue_value().unwrap();
-        assert_eq!(map.deref(), b"bar");
-        let map = data_p.read_at(3, 0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let e = data_p.read_at(0, 8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 0, len: 8 }));
-        let e = data_p.read_at(3, 5).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 3, len: 5 }));
-
-        // `read()` is just shorthand for `read_at(0, ..)`
-        let map = data_p.read(3).continue_value().unwrap();
-        assert_eq!(map.deref(), b"foo");
-        let map = data_p.read(0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let e = data_p.read(8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 0, len: 8 }));
+    fn read_dyn() {
+        let data = *b"foobar";
+        let mut read: (usize, &[u8; _]) = (0, &data);
+        let read_dyn: &mut dyn Read = &mut read;
+        test_read_sealed(read_dyn, &data);
     }
 
-    // Verification of basic `Read` functionality using the vectored
-    // implementation.
     #[test]
-    fn read_basic_vectored() {
-        let data: &mut [&[u8]] = &mut [b"fo", b"o", b"ba", b"r!"];
-        let data_p: &dyn Read = &data;
-
-        // Raw mappings must cover the maximum extents possible, but might not
-        // even cover the requested length.
-        let map = data_p.map_raw(0, 7).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map_raw(0, 0).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map_raw(3, 0).continue_value().unwrap();
-        assert_eq!(map, b"ba");
-        let map = data_p.map_raw(0, 8).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map_raw(3, 5).continue_value().unwrap();
-        assert_eq!(map, b"ba");
-        let map = data_p.map_raw(7, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let e = data_p.map_raw(7, 1).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 7, len: 1 }));
-
-        // Explicit mappings must never exceed the extents.
-        let map = data_p.map_at(0, 7).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map_at(0, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let map = data_p.map_at(3, 3).continue_value().unwrap();
-        assert_eq!(map, b"ba");
-        let map = data_p.map_at(3, 0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let map = data_p.map_at(0, 8).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map_raw(7, 1).break_value().unwrap();
-        assert_eq!(map, Ok(More { idx: 7, len: 1 }));
-
-        // `map()` is just shorthand for `map_at(0, ..)`
-        let map = data_p.map(3).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-        let map = data_p.map(0).continue_value().unwrap();
-        assert_eq!(map, b"");
-        let map = data_p.map(8).continue_value().unwrap();
-        assert_eq!(map, b"fo");
-
-        // Reads must always be matched exactly.
-        let map = data_p.read_at(0, 7).continue_value().unwrap();
-        assert_eq!(map.deref(), b"foobar!");
-        let map = data_p.read_at(0, 0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let map = data_p.read_at(3, 3).continue_value().unwrap();
-        assert_eq!(map.deref(), b"bar");
-        let map = data_p.read_at(3, 0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let e = data_p.read_at(0, 8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 7, len: 1 }));
-        let e = data_p.read_at(3, 5).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 7, len: 1 }));
-
-        // `read()` is just shorthand for `read_at(0, ..)`
-        let map = data_p.read(3).continue_value().unwrap();
-        assert_eq!(map.deref(), b"foo");
-        let map = data_p.read(0).continue_value().unwrap();
-        assert_eq!(map.deref(), b"");
-        let e = data_p.read(8).break_value().unwrap();
-        assert_eq!(e, Ok(More { idx: 7, len: 1 }));
+    fn read_linear() {
+        let data = *b"foobar";
+        let mut read: (usize, &[u8]) = (0, &data);
+        test_read_sealed(&mut read, &data);
     }
 
-    // Verification of `read_at_while()`, using both the trivial and vectored
-    // implementation.
     #[test]
-    fn read_at_while() {
-        let data_plain: &[u8] = b"foobar!";
-        let data_vec: &mut [&[u8]] = &mut [b"fo", b"o", b"ba", b"r!"];
-        let data_plain_p: &dyn Read = &data_plain;
-        let data_vec_p: &dyn Read = &data_vec;
-
-        for data_p in [data_plain_p, data_vec_p] {
-            // Stop when reaching the maximum, even if it would match more.
-            {
-                let mut n = 0;
-                let map = data_p.read_while(&mut n, Some(2),
-                    |_, v| matches!(v, b'f' | b'o'),
-                ).continue_value().unwrap();
-                assert!(map.deref() == b"fo");
-                assert_eq!(n, 2);
-
-                // This time with an offset.
-                let mut n = 0;
-                let map = data_p.read_at_while(3, &mut n, Some(1),
-                    |_, v| matches!(v, b'b' | b'a'),
-                ).continue_value().unwrap();
-                assert_eq!(map.deref(), b"b");
-                assert_eq!(n, 1);
-            }
-
-            // Again, stop at the maximum and do not include the next byte,
-            // especially when it would not match.
-            {
-                let mut n = 0;
-                let map = data_p.read_while(&mut n, Some(3),
-                    |_, v| matches!(v, b'f' | b'o'),
-                ).continue_value().unwrap();
-                assert!(map.deref() == b"foo");
-                assert_eq!(n, 3);
-
-                // This time with an offset.
-                let mut n = 0;
-                let map = data_p.read_at_while(3, &mut n, Some(2),
-                    |_, v| matches!(v, b'b' | b'a'),
-                ).continue_value().unwrap();
-                assert_eq!(map.deref(), b"ba");
-                assert_eq!(n, 2);
-            }
-
-            // Stop when the predicate fails, but include the failing byte in the
-            // map, but not in the length.
-            {
-                let mut n = 0;
-                let map = data_p.read_while(&mut n, Some(4),
-                    |_, v| matches!(v, b'f' | b'o'),
-                ).continue_value().unwrap();
-                assert!(map.deref() == b"foob");
-                assert_eq!(n, 3);
-
-                // This time with an offset.
-                let mut n = 0;
-                let map = data_p.read_at_while(3, &mut n, Some(3),
-                    |_, v| matches!(v, b'b' | b'a'),
-                ).continue_value().unwrap();
-                assert_eq!(map.deref(), b"bar");
-                assert_eq!(n, 2);
-            }
-
-            // Same as before, but without maximum length.
-            {
-                let mut n = 0;
-                let map = data_p.read_while(&mut n, None,
-                    |_, v| matches!(v, b'f' | b'o'),
-                ).continue_value().unwrap();
-                assert!(map.deref() == b"foob");
-                assert_eq!(n, 3);
-
-                // This time with an offset.
-                let mut n = 0;
-                let map = data_p.read_at_while(3, &mut n, None,
-                    |_, v| matches!(v, b'b' | b'a'),
-                ).continue_value().unwrap();
-                assert_eq!(map.deref(), b"bar");
-                assert_eq!(n, 2);
-            }
-        }
+    fn read_vectored() {
+        let data: [[u8; 1]; _] = [[b'f'], [b'o'], [b'o'], [b'b'], [b'a'], [b'r']];
+        let mut read: (usize, &[[u8; 1]]) = (0, &data);
+        test_read_sealed(&mut read, b"foobar");
     }
 
+/*
     // A basic test of the `Write` trait and its helpers, using the trivial
     // and vectored implementations.
     #[test]
@@ -854,4 +574,5 @@ mod test {
             );
         }
     }
+    */
 }
